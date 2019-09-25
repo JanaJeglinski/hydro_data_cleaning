@@ -1,0 +1,496 @@
+---
+title: "hydrology_site_data_cleaning_markdown"
+author: "Laura Allen"
+date: "14 August 2019"
+output: html_document
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## this is just an example of a r markdown script, so might be useful if you want to make one for sharing and presenting code and outputs.
+
+NEXT STEP: I don't know why my figure size code in the chunks doesn't work. 
+
+
+# Hydrology data cleaning and correcting
+## 14 August 2019
+## Laura Allen
+
+
+## Summary plan for all data
+ 1. site level logger data needs to be put into right format, check units, correct for any drift over time and then adjsut the water level to correct for height of well and ground level.
+ 2. once all files have been cleaned, multiple loggers per site should be combined into one doc, and daily averages calculated for each logger.
+ 3. Daily averages of all loggers across sites can then be combined into one spreadsheet. 
+
+###  Stage 1 - individual site-logger files ----
+ Need to process each logger file for each site, pre-2016 and post 2016, individually. Each has different correction factors.
+ 1. Format data into separate columns and correct headings
+ 2. check same units used (metres)
+ 3. check metadata to see if drift has occurred - if yes, plot data to see if this is gradual or distict jump.
+ 4. apply correction for drift to data if needed.
+ 5. get distance to top of well from metadata, and subtract this to correct water level.
+ 6. get ground height and adjust water level to mAOS (m above sea level OS ref)
+ 7. export cleaned file, ready for combining with other loggers and year for same site.
+
+### File structure to use ----
+
+ dataframe with 1 row per logger reading. 
+ Column headings: 
+ date = date format yyyy-mm-dd 
+ time = hh:mm 
+ level_raw = reading from raw data (in metres)
+ datetime = date and time combined, required for plotting data
+ level_drift = water level corrected for any drift/jump (copy raw if no drift)
+ level_corr = water level corrected for drift and then corrected for height to top of well
+ level_os = water level corrected for drift and then corrected for ground elevation
+ site = site name 
+ logger = logger reference (site_logger no.)
+
+
+
+```{r, results="hide"}
+rm(list=ls())
+## Libraries ----
+library(tidyverse)
+```
+
+### Data corrections
+
+The corrections for the offset (logger drift), distance to top of well and elevation data have been gathered into a single table for all loggers, both pre and post the 2016 checks. This means these corrections can easily be checked and applied consistently without opening and copying from 30+ spreadsheets.
+
+```{r}
+# data for corrections ----
+corr<- read.csv("C:/Data/Hydrology/hydrology_corrections.csv")
+head(corr)
+corr$top_of_well <- as.numeric(as.character(corr$top_of_well))
+corr$logger_drift_corr <- as.numeric(as.character(corr$logger_drift_corr))
+corr$elevation <- as.numeric(as.character(corr$elevation))
+head(corr)
+```
+
+### Functions
+
+Functions to apply checks and corrections consistenly across datasets
+
+```{r, results="hide"}
+# Functions ----
+## for checking, correcting and writing the hydrology summary datasets
+
+# function to check hydrology data once formatted
+check <- function(logid){
+  #remove rows with NA readings from data
+  df <- logid[-c(which(is.na(logid$level_raw))),]
+  plot(df$level_raw~df$datetime,type="l",xlab=c("date"),ylab=c("water level below surface (m)"))
+  return(df)
+}
+
+#function to apply corrections to hydro data
+hydrocorr  <- function(logid,drifttype,stepfrom){
+  df <- merge(logid,corr,by=c("site","logger","period"),all.x=T)
+  df$level_drift <- df$level_raw # copy raw data into column for corrected data
+  if(missing(stepfrom)){
+    stepfrom <- as.POSIXct("1990-01-01 00:00")}
+  if(drifttype=="step"){
+    st <- which(df$datetime > stepfrom)# when did step change in lgoger readings occur?
+    df$level_drift[st]<- df$level_drift[st]+df$logger_drift_corr[st]} ## if it is a sudden step in logger values use this correction
+  else if(drifttype=="gradual"){ #if logger drift is gradual use this correction
+    driftval <- df$logger_drift_corr[1] ## value of total drift correction
+    dr <- c(1:length(df[,1]))*(driftval/length(df[,1])) # incremental drift to be applied
+    df$level_drift<- df$level_drift+dr
+  }
+  df$level_corr <- df$level_drift-df$top_of_well # subtract distance to top of well
+  df$level_os <- df$elevation-df$level_corr # get elevation of water table (mASL) (ground level at xy coords - distance from surface)
+  
+  par(mfrow=c(3,1),mar=c(4,4,2,1))
+  plot(df$level_raw~df$datetime,type="l",ylim=c(0,5),xlab=c("date"),ylab=c("water level below surface (m)"))#plots to check data after applying corrections
+  mtext("raw readings",side=3)
+  plot(df$level_drift~df$datetime,type="l",ylim=c(0,5),xlab=c("date"),ylab=c("water level below surface (m)"))#plots to check data after applying corrections
+  mtext("logger drift corrected",side=3)
+  plot(df$level_corr~df$datetime,type="l",ylim=c(0,5),xlab=c("date"),ylab=c("water level below surface (m)"))
+  abline(0,0,lty="dashed",col="red")
+  mtext("distance to top of well subtracted",side=3)
+  
+  #calculate daily means
+  df_mean_levels <- group_by(df,date) %>%
+    summarise_at(c("level_raw","level_drift","level_corr","level_os"),mean,na.rm=TRUE) 
+  df_mean_levels$site <- rep(df$site[1],length(df_mean_levels[,1]))
+  df_mean_levels$logger <- rep(df$logger[1],length(df_mean_levels[,1]))
+  df_mean_levels$period <- rep(df$period [1],length(df_mean_levels[,1]))
+  return(df_mean_levels)
+}
+
+#function to write file once you have checked output
+hydrowrite <- function(mean_data){
+  filepath <- paste0("C:/Data/Hydrology/cleaned_site_logger/",mean_data$site[1],"_",mean_data$logger[1],"_",mean_data$period[1],".csv")
+  write.csv(mean_data,filepath)
+}
+```
+
+
+### Cleaning the data
+#### Abernethy logger 1
+
+Raw Abernethy data, tidied up and formatted 
+
+pre2016
+```{r}
+### 1 Abernethy ----
+## pre 2016
+# logger 1
+## reshaping data to standard format to be done manually, as lots of small differences between files
+ab01a <- read.csv("C:/Data/Hydrology/Hydrology_data_pre2016/Abernethy/Aberneth01/ABERNETH01 0001 20150317.csv")
+str(ab01a)
+names(ab01a) <- c("date","time","level_raw") #rename columns
+ab01a$date <- as.Date(as.character(ab01a$date),format="%d.%m.%Y") ## change dates to date format
+ab01a$level_raw <- as.numeric(as.character(ab01a$level_raw)) ## format water level as numeric
+ab01a$datetime <- paste(ab01a$date,ab01a$time)
+ab01a$datetime <- as.POSIXct(ab01a$datetime, format="%Y-%m-%d %H:%M") # posixct format includes both date and time 
+ab01a$site <- c(rep("Abernethy", length(ab01a[,1])))
+ab01a$logger <- c(rep("ABERNETH01", length(ab01a[,1])))
+ab01a$period <- c(rep("pre2016", length(ab01a[,1])))
+head(ab01a)
+```
+
+Check data 
+```{r}
+ab01a <- check(ab01a) #check data
+```
+Apply corrections required
+```{r, fig.height = 13, fig.width = 10}
+meandf_a <- hydrocorr(logid=ab01a,drifttype = "step") # calculate corrected daily means
+#hydrowrite(meandf_a) # write file
+## used 'step' correction across whole datset, based on plotting data and comparing with post2016
+```
+
+Abernethy logger 1 Post 2016
+```{r}
+## Post-2016
+# Logger 1 
+ab01b <- read.csv("C:/Data/Hydrology/Hydrology_data_2016-2018_HydroSol/Abernethy/Data/Groundwater/ABERNETH01 20180209131537.csv")
+str(ab01b)
+ab01b<- separate(ab01b,1,c("Date","Time","Level","ch2","ch3"),sep=";",remove=T)
+ab01b <- ab01b[,c(1:3)]
+names(ab01b) <- c("date","time","level_raw") #rename columns
+ab01b$date <- as.Date(as.character(ab01b$date),format="%d.%m.%Y") ## change dates to date format
+ab01b$level_raw <- as.numeric(as.character(ab01b$level_raw)) ## format water level as numeric
+ab01b$datetime <- paste(ab01b$date,ab01b$time)
+ab01b$datetime <- as.POSIXct(ab01b$datetime, format="%Y-%m-%d %H:%M")
+ab01b$site <- c(rep("Abernethy", length(ab01b[,1])))
+ab01b$logger <- c(rep("ABERNETH01", length(ab01b[,1])))
+ab01b$period <- c(rep("post2016", length(ab01b[,1])))
+head(ab01b)
+```
+
+```{r}
+ab01b <- check(ab01b) #check data
+```
+```{r, fig.height = 13, fig.width = 10}
+meandf_b <- hydrocorr(logid=ab01b,drifttype = "gradual") # calculate corrected daily means
+#hydrowrite(meandf_b) # write file
+```
+
+
+Comparison of the pre and post 2016 datasets
+```{r}
+#compare pre and post 2016
+prepost2016 <- rbind(meandf_a,meandf_b) # compare pre and post 2016 data 
+par(mfrow=c(1,1))
+plot(prepost2016$level_corr~prepost2016$date,type="l",xlab=c("date"),ylab=c("corrected water level below surface (m)"),main=paste(meandf_a$site[1],meandf_a$logger[1])) # match fine
+```
+
+-----------
+#### Abernethy logger 2
+```{r, results = "hide"}
+#pre2016
+ab02a <- read.csv("C:/Data/Hydrology/Hydrology_data_pre2016/Abernethy/Aberneth02/ABERNETH02 0001 20150317.csv")
+str(ab02a)
+names(ab02a) <- c("date","time","level_raw") #rename columns
+ab02a$date <- as.Date(as.character(ab02a$date),format="%d.%m.%Y") ## change dates to date format
+ab02a$level_raw <- as.numeric(as.character(ab02a$level_raw)) ## format water level as numeric
+ab02a$datetime <- paste(ab02a$date,ab02a$time)
+ab02a$datetime <- as.POSIXct(ab02a$datetime, format="%Y-%m-%d %H:%M")
+ab02a$site <- c(rep("Abernethy", length(ab02a[,1])))
+ab02a$logger <- c(rep("ABERNETH02", length(ab02a[,1])))
+ab02a$period <- c(rep("pre2016", length(ab02a[,1])))
+```
+```{r}}
+head(ab02a)
+ab02a <- check(ab02a) #check data
+```
+
+```{r, fig.height = 13, fig.width = 10}
+meandf_a <- hydrocorr(logid=ab02a,drifttype = "gradual") # calculate corrected daily means
+#hydrowrite(meandf_a) # write file
+```
+
+```{r, results="hide"}
+# post 2016
+# Logger 2 
+ab02b <- read.csv("C:/Data/Hydrology/Hydrology_data_2016-2018_HydroSol/Abernethy/Data/Groundwater/ABERNETH02 20180209120557.csv")
+str(ab02b)
+ab02b<- separate(ab02b,1,c("Date","Time","Level","ch2","ch3"),sep=";",remove=T)
+ab02b <- ab02b[,c(1:3)]
+names(ab02b) <- c("date","time","level_raw") #rename columns
+ab02b$date <- as.Date(as.character(ab02b$date),format="%d.%m.%Y") ## change dates to date format
+ab02b$level_raw <- as.numeric(as.character(ab02b$level_raw)) ## format water level as numeric
+ab02b$datetime <- paste(ab02b$date,ab02b$time)
+ab02b$datetime <- as.POSIXct(ab02b$datetime, format="%Y-%m-%d %H:%M")
+ab02b$site <- c(rep("Abernethy", length(ab02b[,1])))
+ab02b$logger <- c(rep("ABERNETH02", length(ab02b[,1])))
+ab02b$period <- c(rep("post2016", length(ab02b[,1])))
+```
+```{r}
+head(ab02b)
+```
+
+```{r}
+ab02b <- check(ab02b) #check data
+```
+```{r, fig.height = 13, fig.width = 10}
+meandf_b <- hydrocorr(logid=ab02b,drifttype = "gradual") # calculate corrected daily means
+#hydrowrite(meandf_b) # write file
+```
+```{r}
+#compare pre and post 2016
+prepost2016 <- rbind(meandf_a,meandf_b) # compare pre and post 2016 data 
+par(mfrow=c(1,1))
+plot(prepost2016$level_corr~prepost2016$date,type="l",xlab=c("date"),ylab=c("corrected water level below surface (m)"),main=paste(meandf_a$site[1],meandf_a$logger[1])) # match fine
+```
+
+```{r, results="hide"}
+##///////////////////////////
+## logger 3
+#pre 2016
+
+ab03a <- read.csv("C:/Data/Hydrology/Hydrology_data_pre2016/Abernethy/Aberneth03/ABERNETH03 0001 20150317.csv")
+str(ab03a)
+names(ab03a) <- c("date","time","level_raw") #rename columns
+ab03a$date <- as.Date(as.character(ab03a$date),format="%d.%m.%Y") ## change dates to date format
+ab03a$level_raw <- as.numeric(as.character(ab03a$level_raw)) ## format water level as numeric
+ab03a$datetime <- paste(ab03a$date,ab03a$time)
+ab03a$datetime <- as.POSIXct(ab03a$datetime, format="%Y-%m-%d %H:%M")
+ab03a$site <- c(rep("Abernethy", length(ab03a[,1])))
+ab03a$logger <- c(rep("ABERNETH03", length(ab03a[,1])))
+ab03a$period <- c(rep("pre2016", length(ab03a[,1])))
+```
+```{r}
+head(ab03a)
+```
+
+```{r}
+ab03a <- check(ab03a) #check data
+```
+```{r, fig.height = 13, fig.width = 10}
+meandf_a <- hydrocorr(logid=ab03a,drifttype = "gradual") # calculate corrected daily means
+#hydrowrite(meandf_a) # write file
+```
+
+```{r, results= "hide"}
+#post 2016
+# Logger 3 
+ab03b <- read.csv("C:/Data/Hydrology/Hydrology_data_2016-2018_HydroSol/Abernethy/Data/Groundwater/ABERNETH02 20180209120557.csv")
+str(ab03b)
+ab03b<- separate(ab03b,1,c("Date","Time","Level","ch2","ch3"),sep=";",remove=T)
+ab03b <- ab03b[,c(1:3)]
+names(ab03b) <- c("date","time","level_raw") #rename columns
+ab03b$date <- as.Date(as.character(ab03b$date),format="%d.%m.%Y") ## change dates to date format
+ab03b$level_raw <- as.numeric(as.character(ab03b$level_raw)) ## format water level as numeric
+ab03b$datetime <- paste(ab03b$date,ab03b$time)
+ab03b$datetime <- as.POSIXct(ab03b$datetime, format="%Y-%m-%d %H:%M")
+ab03b$site <- c(rep("Abernethy", length(ab03b[,1])))
+ab03b$logger <- c(rep("ABERNETH03", length(ab03b[,1])))
+ab03b$period <- c(rep("post2016", length(ab03b[,1])))
+```
+```{r}
+head(ab03b)
+```
+```{r}
+ab03b <- check(ab03b) #check data
+```
+```{r, fig.height = 13, fig.width = 10}
+meandf_b <- hydrocorr(logid=ab03b,drifttype = "gradual") # calculate corrected daily means
+#hydrowrite(meandf_b) # write file
+```
+```{r}
+#compare pre and post 2016
+prepost2016 <- rbind(meandf_a,meandf_b) # compare pre and post 2016 data 
+par(mfrow=c(1,1))
+plot(prepost2016$level_corr~prepost2016$date,type="l",xlab=c("date"),ylab=c("corrected water level below surface (m)"),main=paste(meandf_a$site[1],meandf_a$logger[1])) # match fine
+
+## *!* I have assumed a typo in the distance to top of well: changed from 1.62 to 0.62 for this logger.
+# Logger was changed at some point, so this could explain the differences between years, need to check.
+# 
+```
+
+```{r, results="hide"}
+##///////////////////////////
+### 2 Glenmullie ----
+## site 1 
+# pre 2016
+gm01a <- read.csv("C:/Data/Hydrology/Hydrology_data_pre2016/Glenmullie/Site 1/0GLENMULL1 0001 20150318.csv")
+str(gm01a)
+gm01a <- separate(gm01a,1,c("date","time","level_raw"),sep=";",remove=T)
+gm01a$date <- as.Date(as.character(gm01a$date),format="%d.%m.%Y") ## change dates to date format
+gm01a$level_raw <- as.numeric(as.character(gm01a$level_raw)) ## format water level as numeric
+gm01a$datetime <- paste(gm01a$date,gm01a$time)
+gm01a$datetime <- as.POSIXct(gm01a$datetime, format="%Y-%m-%d %H:%M")
+gm01a$site <- c(rep("Glenmullie", length(gm01a[,1])))
+gm01a$logger <- c(rep("0GLENMULL1", length(gm01a[,1])))
+gm01a$period <- c(rep("pre2016", length(gm01a[,1])))
+```
+```{r}
+head(gm01a)
+```
+
+```{r}
+gm01a <- check(gm01a) #check data
+tail(gm01a)
+gm01a <- gm01a[-length(gm01a[,1]),] #removed last reading (probably when checking logger
+```
+```{r, fig.height = 13, fig.width = 10}
+meandf_a <- hydrocorr(logid=gm01a,drifttype = "gradual") # calculate corrected daily means
+#hydrowrite(meandf_a) # write file
+```
+
+```{r}
+# post2016
+gm01b <- read.csv("C:/Data/Hydrology/Hydrology_data_2016-2018_HydroSol/Glenmullie/Data/Groundwater/0GLENMULL1 20180412125459.csv")
+str(gm01b)
+gm01b <- separate(gm01b,1,c("date","time","level_raw","ch2","ch3","ch7"),sep=";",remove=T)
+gm01b <- gm01b[,c(1:3)]
+gm01b$date <- as.Date(as.character(gm01b$date),format="%d.%m.%Y") ## change dates to date format
+gm01b$level_raw <- as.numeric(as.character(gm01b$level_raw)) ## format water level as numeric
+gm01b$datetime <- paste(gm01b$date,gm01b$time)
+gm01b$datetime <- as.POSIXct(gm01b$datetime, format="%Y-%m-%d %H:%M")
+gm01b$site <- c(rep("Glenmullie", length(gm01b[,1])))
+gm01b$logger <- c(rep("0GLENMULL1", length(gm01b[,1])))
+gm01b$period <- c(rep("post2016", length(gm01b[,1])))
+head(gm01b)
+```
+
+```{r}
+gm01b <- check(gm01b) #check data
+```
+```{r, fig.height = 13, fig.width = 10}
+meandf_b <- hydrocorr(logid=gm01b,drifttype = "gradual") # calculate corrected daily means
+#hydrowrite(meandf_b) # write file
+```
+```{r}
+#compare pre and post 2016
+prepost2016 <- rbind(meandf_a,meandf_b) # compare pre and post 2016 data 
+par(mfrow=c(1,1))
+plot(prepost2016$level_corr~prepost2016$date,type="l",xlab=c("date"),ylab=c("corrected water level below surface (m)"),main=paste(meandf_a$site[1],meandf_a$logger[1])) # match fine
+```
+
+```{r}
+###////////////
+## site 2 
+# pre 2016
+gm02a <- read.csv("C:/Data/Hydrology/Hydrology_data_pre2016/Glenmullie/Site 2/0GLENMULL2 0001 20150318.csv")
+str(gm02a)
+gm02a <- separate(gm02a,1,c("date","time","level_raw"),sep=";",remove=T)
+gm02a$date <- as.Date(as.character(gm02a$date),format="%d.%m.%Y") ## change dates to date format
+gm02a$level_raw <- as.numeric(as.character(gm02a$level_raw)) ## format water level as numeric
+gm02a$datetime <- paste(gm02a$date,gm02a$time)
+gm02a$datetime <- as.POSIXct(gm02a$datetime, format="%Y-%m-%d %H:%M")
+gm02a$site <- c(rep("Glenmullie", length(gm02a[,1])))
+gm02a$logger <- c(rep("0GLENMULL2", length(gm02a[,1])))
+gm02a$period <- c(rep("pre2016", length(gm02a[,1])))
+head(gm02a)
+```
+```{r}
+gm02a <- check(gm02a) #check data
+```
+```{r, fig.height = 13, fig.width = 10}
+meandf_a <- hydrocorr(logid=gm02a,drifttype = "gradual") # calculate corrected daily means
+#hydrowrite(meandf_a) # write file
+```
+
+```{r}
+# post2016
+gm02b <- read.csv("C:/Data/Hydrology/Hydrology_data_2016-2018_HydroSol/Glenmullie/Data/Groundwater/0GLENMULL2 20180412112419.csv")
+str(gm02b)
+gm02b <- separate(gm02b,1,c("date","time","level_raw","ch2","ch3","ch7"),sep=";",remove=T)
+gm02b <- gm02b[,c(1:3)]
+gm02b$date <- as.Date(as.character(gm02b$date),format="%d.%m.%Y") ## change dates to date format
+gm02b$level_raw <- as.numeric(as.character(gm02b$level_raw)) ## format water level as numeric
+gm02b$datetime <- paste(gm02b$date,gm02b$time)
+gm02b$datetime <- as.POSIXct(gm02b$datetime, format="%Y-%m-%d %H:%M")
+gm02b$site <- c(rep("Glenmullie", length(gm02b[,1])))
+gm02b$logger <- c(rep("0GLENMULL2", length(gm02b[,1])))
+gm02b$period <- c(rep("post2016", length(gm02b[,1])))
+head(gm02b)
+```
+```{r}
+gm02b <- check(gm02b) #check data
+```
+```{r, fig.height = 13, fig.width = 10}
+meandf_b <- hydrocorr(logid=gm02b,drifttype = "gradual") # calculate corrected daily means
+#hydrowrite(meandf_b) # write file
+```
+```{r}
+#compare pre and post 2016
+prepost2016 <- rbind(meandf_a,meandf_b) # compare pre and post 2016 data 
+par(mfrow=c(1,1))
+plot(prepost2016$level_corr~prepost2016$date,type="l",xlab=c("date"),ylab=c("corrected water level below surface (m)"),main=paste(meandf_a$site[1],meandf_a$logger[1])) # match fine
+```
+
+```{r}
+###////////////
+## site 3 
+# pre 2016 - no data
+
+# post2016
+gm03b <- read.csv("C:/Data/Hydrology/Hydrology_data_2016-2018_HydroSol/Glenmullie/Data/Groundwater/0GLENMULL3 20180412105228.csv")
+str(gm03b)
+gm03b <- separate(gm03b,1,c("date","time","level_raw","ch2","ch3","ch7"),sep=";",remove=T)
+gm03b <- gm03b[,c(1:3)]
+gm03b$date <- as.Date(as.character(gm03b$date),format="%d.%m.%Y") ## change dates to date format
+gm03b$level_raw <- as.numeric(as.character(gm03b$level_raw)) ## format water level as numeric
+gm03b$datetime <- paste(gm03b$date,gm03b$time)
+gm03b$datetime <- as.POSIXct(gm03b$datetime, format="%Y-%m-%d %H:%M")
+gm03b$site <- c(rep("Glenmullie", length(gm03b[,1])))
+gm03b$logger <- c(rep("0GLENMULL3", length(gm03b[,1])))
+gm03b$period <- c(rep("post2016", length(gm03b[,1])))
+head(gm03b)
+```
+```{r}
+gm03b <- check(gm03b) #check data
+```
+```{r, fig.height = 13, fig.width = 10}
+meandf_b <- hydrocorr(logid=gm03b,drifttype = "gradual") # calculate corrected daily means
+#hydrowrite(meandf_b) # write file
+```
+
+```{r}
+###////////////
+## site 4 
+# pre 2016 - no data
+
+# post2016
+gm04b <- read.csv("C:/Data/Hydrology/Hydrology_data_2016-2018_HydroSol/Glenmullie/Data/Groundwater/0GLENMULL4 20180412120351.csv")
+str(gm04b)
+gm04b <- separate(gm04b,1,c("date","time","level_raw","ch2","ch3","ch7"),sep=";",remove=T)
+gm04b <- gm04b[,c(1:3)]
+gm04b$date <- as.Date(as.character(gm04b$date),format="%d.%m.%Y") ## change dates to date format
+gm04b$level_raw <- as.numeric(as.character(gm04b$level_raw)) ## format water level as numeric
+gm04b$datetime <- paste(gm04b$date,gm04b$time)
+gm04b$datetime <- as.POSIXct(gm04b$datetime, format="%Y-%m-%d %H:%M")
+gm04b$site <- c(rep("Glenmullie", length(gm04b[,1])))
+gm04b$logger <- c(rep("0GLENMULL4", length(gm04b[,1])))
+gm04b$period <- c(rep("post2016", length(gm04b[,1])))
+head(gm04b)
+```
+
+```{r}
+gm04b <- check(gm04b) #check data
+gm04b <- gm04b[-1,] #removed first row as date seems incorrect
+```
+```{r, fig.height = 13, fig.width = 10}
+meandf_b <- hydrocorr(logid=gm04b,drifttype = "gradual") # calculate corrected daily means
+#hydrowrite(meandf_b) # write file
+
+```
+
